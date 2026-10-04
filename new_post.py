@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from atproto import Client
+from PIL import Image
 
 
 # ============================================================
@@ -55,6 +56,11 @@ def get_media_type(filename):
         return "video"
 
     return None
+
+
+def get_image_dimensions(path):
+    with Image.open(path) as image:
+        return image.size
 
 
 # ============================================================
@@ -142,6 +148,30 @@ def main():
     print(f"   Size: {local_size} bytes")
 
     # --------------------------------------------------------
+    # GET ORIGINAL IMAGE DIMENSIONS
+    # --------------------------------------------------------
+
+    image_width = None
+    image_height = None
+
+    if media_type == "image":
+
+        try:
+            image_width, image_height = get_image_dimensions(
+                local_path
+            )
+
+        except Exception as exc:
+            fail(
+                f"Could not read image dimensions: {exc}"
+            )
+
+        print()
+        print("📐 Original image dimensions")
+        print(f"   Width : {image_width}px")
+        print(f"   Height: {image_height}px")
+
+    # --------------------------------------------------------
     # LOGIN
     # --------------------------------------------------------
 
@@ -183,7 +213,11 @@ def main():
             response = client.send_image(
                 text="",
                 image=media_data,
-                image_alt=""
+                image_alt="",
+                aspect_ratio={
+                    "width": image_width,
+                    "height": image_height,
+                }
             )
 
         elif media_type == "video":
