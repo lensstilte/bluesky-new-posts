@@ -95,12 +95,7 @@ def find_ready_photo(drive, account_name):
             f"ready folder not found for: {account_name}"
         )
 
-    # Supports:
-    # - JPG
-    # - JPEG
-    # - PNG
-    # - WEBP
-    # - MP4
+    # Supports images and MP4 videos.
     query = (
         f"'{ready_folder['id']}' in parents "
         f"and trashed = false "
@@ -212,4 +207,117 @@ def move_to_used(drive, photo):
     print("✅ Media moved successfully")
     print(
         f"   {photo['account']}/ready → "
-       
+        f"{photo['account']}/used"
+    )
+
+
+# ============================================================
+# GET PHOTO / VIDEO
+# ============================================================
+
+def get_photo(account_name):
+    drive = get_drive()
+
+    print(
+        f"🔎 Looking for media: "
+        f"{account_name}/ready"
+    )
+
+    photo = find_ready_photo(
+        drive,
+        account_name
+    )
+
+    if not photo:
+        print(
+            f"⚠️ No media available in "
+            f"{account_name}/ready"
+        )
+        return None, None
+
+    print()
+    print("📸 Media found")
+    print(f"   Account: {photo['account']}")
+    print(f"   Name: {photo['name']}")
+    print(f"   Type: {photo['mime_type']}")
+    print(f"   Size: {photo['size']} bytes")
+
+    path = download_photo(
+        drive,
+        photo
+    )
+
+    return photo, path
+
+
+# ============================================================
+# MARK MEDIA AS USED
+# ============================================================
+
+def mark_photo_used(photo):
+    if not photo:
+        raise RuntimeError(
+            "Cannot mark media as used: "
+            "no media supplied"
+        )
+
+    drive = get_drive()
+
+    move_to_used(
+        drive,
+        photo
+    )
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    account = os.environ.get(
+        "PHOTO_ACCOUNT",
+        "Beautyfan"
+    )
+
+    move_after_download = os.environ.get(
+        "MOVE_AFTER_DOWNLOAD",
+        "false"
+    ).lower() == "true"
+
+    print("========================================")
+    print("       BLUESKY PHOTO MANAGER")
+    print("========================================")
+    print()
+    print(f"Account: {account}")
+    print(
+        f"Move after download: "
+        f"{move_after_download}"
+    )
+    print()
+
+    photo, path = get_photo(account)
+
+    if not photo:
+        raise SystemExit(0)
+
+    print()
+    print(
+        "🎉 Photo Manager download successful!"
+    )
+
+    if move_after_download:
+        mark_photo_used(photo)
+
+        print()
+        print(
+            "🎉 Photo Manager move test successful!"
+        )
+
+    else:
+        print()
+        print("ℹ️ Media was NOT moved.")
+        print(
+            f"ℹ️ It is still in "
+            f"{account}/ready"
+        )
