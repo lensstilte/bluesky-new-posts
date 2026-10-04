@@ -2,8 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-from atproto import Client
-from PIL import Image
+from atproto import Client, models
 
 
 # ============================================================
@@ -56,11 +55,6 @@ def get_media_type(filename):
         return "video"
 
     return None
-
-
-def get_image_dimensions(path):
-    with Image.open(path) as image:
-        return image.size
 
 
 # ============================================================
@@ -157,9 +151,10 @@ def main():
     if media_type == "image":
 
         try:
-            image_width, image_height = get_image_dimensions(
-                local_path
-            )
+            from PIL import Image
+
+            with Image.open(local_path) as image:
+                image_width, image_height = image.size
 
         except Exception as exc:
             fail(
@@ -208,27 +203,75 @@ def main():
 
             media_data = media_file.read()
 
+        # ====================================================
+        # IMAGE
+        # ====================================================
+
         if media_type == "image":
 
-            response = client.send_image(
-                text="",
-                image=media_data,
-                image_alt="",
-                aspect_ratio={
-                    "width": image_width,
-                    "height": image_height,
-                }
+            uploaded = client.upload_blob(
+                media_data
+            ).blob
+
+            new_image = (
+                models.AppBskyEmbedImages.Image(
+                    alt="",
+                    image=uploaded,
+                    aspect_ratio={
+                        "width": image_width,
+                        "height": image_height,
+                    }
+                )
             )
+
+            new_embed = (
+                models.AppBskyEmbedImages.Main(
+                    images=[new_image]
+                )
+            )
+
+            response = client.send_post(
+                text="",
+                embed=new_embed
+            )
+
+        # ====================================================
+        # VIDEO
+        # ====================================================
 
         elif media_type == "video":
 
-            response = client.send_video(
+            uploaded = client.upload_blob(
+                media_data
+            ).blob
+
+            # Voor video gebruiken we dezelfde Bluesky
+            # embed-methode als in het werkende
+            # WomenWorld-script.
+            #
+            # De aspect ratio wordt hier alleen ingevuld
+            # wanneer we die betrouwbaar kunnen bepalen.
+
+            from PIL import Image
+
+            # Video-afmetingen worden niet uit het bestand
+            # gehaald met Pillow. Daarom gebruiken we voor
+            # video's geen verzonnen aspect ratio.
+
+            new_embed = (
+                models.AppBskyEmbedVideo.Main(
+                    video=uploaded,
+                    alt=None
+                )
+            )
+
+            response = client.send_post(
                 text="",
-                video=media_data,
-                video_alt=""
+                embed=new_embed
             )
 
         else:
+
             fail(
                 "Unknown media type."
             )
@@ -294,9 +337,7 @@ def main():
         )
 
         print()
-        print(
-            "⚠️ IMPORTANT:"
-        )
+        print("⚠️ IMPORTANT:")
         print(
             "   The Bluesky post WAS successful."
         )
