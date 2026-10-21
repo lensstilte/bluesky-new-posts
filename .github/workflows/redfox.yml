@@ -1,0 +1,31 @@
+name: RedFox New Post
+
+on:
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install atproto pillow google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+
+      - name: Post RedFox media
+        env:
+          BLUESKY_HANDLE: redheadheaven.bsky.social
+          BLUESKY_PASSWORD: ${{ secrets.POST_REDHEADHEAVEN_PASSWORD }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          POST_TEXT: "♥️ @redfoxofficial.bsky.social ♥️"
+        run: |
+          python new_post_redfox.py
