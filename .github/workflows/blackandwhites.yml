@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install atproto google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+          pip install atproto google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib Pillow
 
       - name: Publish Blackandwhites media
         env:
