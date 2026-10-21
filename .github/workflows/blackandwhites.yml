@@ -1,0 +1,32 @@
+
+name: Blackandwhites New Post
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "21 * * * *"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install atproto google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+
+      - name: Publish Blackandwhites media
+        env:
+          ACCOUNT_NAME: Blackandwhites
+          BLUESKY_HANDLE: blackandwhites.bsky.social
+          BLUESKY_PASSWORD: ${{ secrets.POST_BLACKANDWHITES_PASSWORD }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python new_post.py
