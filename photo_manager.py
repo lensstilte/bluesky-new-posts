@@ -1,3 +1,4 @@
+
 import os
 import json
 from pathlib import Path
@@ -6,107 +7,90 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
 MAIN_FOLDER_ID = "1JQx_1SBOETCSMlmlQSIFOjSBuL4op5KA"
-
-SCOPES = [
-    "https://www.googleapis.com/auth/drive"
-]
-
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 DOWNLOAD_DIR = Path("photo_downloads")
 
 
-# ============================================================
-# GOOGLE DRIVE
-# ============================================================
-
 def get_drive():
-    raw_json = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+    raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    if not raw_json:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is niet ingesteld."
+        )
 
     service_account_info = json.loads(raw_json)
 
     credentials = service_account.Credentials.from_service_account_info(
         service_account_info,
-        scopes=SCOPES
+        scopes=SCOPES,
     )
 
     return build(
         "drive",
         "v3",
         credentials=credentials,
-        cache_discovery=False
+        cache_discovery=False,
     )
 
 
-# ============================================================
-# FIND FOLDER
-# ============================================================
-
 def find_folder(drive, name, parent_id):
+    escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
+
     query = (
-        f"name = '{name}' "
+        f"name = '{escaped_name}' "
         f"and '{parent_id}' in parents "
-        f"and mimeType = 'application/vnd.google-apps.folder' "
-        f"and trashed = false"
+        "and mimeType = 'application/vnd.google-apps.folder' "
+        "and trashed = false"
     )
 
     result = drive.files().list(
         q=query,
         fields="files(id,name)",
-        orderBy="name"
+        orderBy="name",
+        pageSize=100,
     ).execute()
 
     folders = result.get("files", [])
+    return folders[0] if folders else None
 
-    if not folders:
-        return None
-
-    return folders[0]
-
-
-# ============================================================
-# FIND READY MEDIA
-# ============================================================
 
 def find_ready_photo(drive, account_name):
     account_folder = find_folder(
         drive,
         account_name,
-        MAIN_FOLDER_ID
+        MAIN_FOLDER_ID,
     )
 
     if not account_folder:
         raise RuntimeError(
-            f"Account folder not found: {account_name}"
+            f"Accountmap niet gevonden in Google Drive: {account_name}"
         )
 
     ready_folder = find_folder(
         drive,
         "ready",
-        account_folder["id"]
+        account_folder["id"],
     )
 
     if not ready_folder:
         raise RuntimeError(
-            f"ready folder not found for: {account_name}"
+            f"Map 'ready' niet gevonden voor {account_name}"
         )
 
-    # Supports images and MP4 videos.
     query = (
         f"'{ready_folder['id']}' in parents "
-        f"and trashed = false "
-        f"and (mimeType contains 'image/' "
-        f"or mimeType = 'video/mp4')"
+        "and trashed = false "
+        "and mimeType != 'application/vnd.google-apps.folder' "
+        "and mimeType != 'application/vnd.google-apps.shortcut'"
     )
 
     result = drive.files().list(
         q=query,
         fields="files(id,name,mimeType,size,createdTime)",
-        orderBy="createdTime"
+        orderBy="createdTime",
+        pageSize=100,
     ).execute()
 
     files = result.get("files", [])
@@ -114,42 +98,45 @@ def find_ready_photo(drive, account_name):
     if not files:
         return None
 
+    # Oudste bestand eerst.
+    first = files[0]
+
     return {
         "account": account_name,
-        "file_id": files[0]["id"],
-        "name": files[0]["name"],
-        "mime_type": files[0]["mimeType"],
-        "size": int(files[0].get("size", 0)),
-        "created_time": files[0].get("createdTime"),
+        "file_id": first["id"],
+        "name": first["name"],
+        "mime_type": first.get(
+            "mimeType",
+            "application/octet-stream",
+        ),
+        "size": int(first.get("size", 0)),
+        "created_time": first.get("createdTime"),
         "ready_folder_id": ready_folder["id"],
         "account_folder_id": account_folder["id"],
     }
 
 
-# ============================================================
-# DOWNLOAD
-# ============================================================
-
 def download_photo(drive, photo):
     DOWNLOAD_DIR.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
-    destination = DOWNLOAD_DIR / photo["name"]
+    safe_name = Path(photo["name"]).name
+    destination = DOWNLOAD_DIR / safe_name
 
     if destination.exists():
         destination.unlink()
 
     request = drive.files().get_media(
-        fileId=photo["file_id"]
+        fileId=photo["file_id"],
     )
 
-    with open(destination, "wb") as fh:
+    with open(destination, "wb") as file_handle:
         downloader = MediaIoBaseDownload(
-            fh,
+            file_handle,
             request,
-            chunksize=1024 * 1024
+            chunksize=1024 * 1024,
         )
 
         done = False
@@ -158,166 +145,123 @@ def download_photo(drive, photo):
             status, done = downloader.next_chunk()
 
             if status:
-                progress = int(status.progress() * 100)
-                print(f"   Download: {progress}%")
+                print(
+                    f"   Download: {int(status.progress() * 100)}%"
+                )
 
     downloaded_size = destination.stat().st_size
 
     if downloaded_size != photo["size"]:
         raise RuntimeError(
-            f"Downloaded size mismatch! "
-            f"Drive={photo['size']} bytes, "
-            f"Downloaded={downloaded_size} bytes"
+            "Gedownloade bestandsgrootte klopt niet. "
+            f"Drive: {photo['size']} bytes; "
+            f"download: {downloaded_size} bytes."
         )
 
-    print("✅ Original file downloaded")
-    print(f"   File: {destination}")
-    print(f"   Size: {downloaded_size} bytes")
+    print("✅ Origineel bestand gedownload")
+    print(f"   Bestand: {destination}")
+    print(f"   Grootte: {downloaded_size} bytes")
 
     return destination
 
-
-# ============================================================
-# MOVE TO USED
-# ============================================================
 
 def move_to_used(drive, photo):
     used_folder = find_folder(
         drive,
         "used",
-        photo["account_folder_id"]
+        photo["account_folder_id"],
     )
 
     if not used_folder:
         raise RuntimeError(
-            f"used folder not found for: {photo['account']}"
+            f"Map 'used' niet gevonden voor {photo['account']}. "
+            "Maak de map 'used' aan naast 'ready'."
         )
 
-    print()
-    print(f"📦 Moving to {photo['account']}/used...")
-    print(f"   File: {photo['name']}")
+    print(
+        f"\n📦 Bestand verplaatsen naar "
+        f"{photo['account']}/used..."
+    )
+    print(f"   Bestand: {photo['name']}")
 
     drive.files().update(
         fileId=photo["file_id"],
         addParents=used_folder["id"],
         removeParents=photo["ready_folder_id"],
-        fields="id,name,parents"
+        fields="id,name,parents",
     ).execute()
 
-    print("✅ Media moved successfully")
+    print("✅ Bestand succesvol verplaatst")
     print(
         f"   {photo['account']}/ready → "
         f"{photo['account']}/used"
     )
 
 
-# ============================================================
-# GET PHOTO / VIDEO
-# ============================================================
-
 def get_photo(account_name):
     drive = get_drive()
 
     print(
-        f"🔎 Looking for media: "
-        f"{account_name}/ready"
+        f"🔎 Zoeken naar media in {account_name}/ready..."
     )
 
     photo = find_ready_photo(
         drive,
-        account_name
+        account_name,
     )
 
     if not photo:
         print(
-            f"⚠️ No media available in "
+            f"⚠️ Geen bestanden gevonden in "
             f"{account_name}/ready"
         )
         return None, None
 
-    print()
-    print("📸 Media found")
+    print("\n📸 Bestand gevonden")
     print(f"   Account: {photo['account']}")
-    print(f"   Name: {photo['name']}")
+    print(f"   Naam: {photo['name']}")
     print(f"   Type: {photo['mime_type']}")
-    print(f"   Size: {photo['size']} bytes")
+    print(f"   Grootte: {photo['size']} bytes")
 
-    path = download_photo(
+    local_path = download_photo(
         drive,
-        photo
+        photo,
     )
 
-    return photo, path
+    return photo, local_path
 
-
-# ============================================================
-# MARK MEDIA AS USED
-# ============================================================
 
 def mark_photo_used(photo):
     if not photo:
         raise RuntimeError(
-            "Cannot mark media as used: "
-            "no media supplied"
+            "Kan bestand niet verplaatsen: geen bestand geselecteerd."
         )
 
     drive = get_drive()
-
     move_to_used(
         drive,
-        photo
+        photo,
     )
 
-
-# ============================================================
-# TEST
-# ============================================================
 
 if __name__ == "__main__":
-
     account = os.environ.get(
-        "PHOTO_ACCOUNT",
-        "Beautyfan"
+        "ACCOUNT_NAME",
+        os.environ.get("PHOTO_ACCOUNT", "Beautyfan"),
     )
 
-    move_after_download = os.environ.get(
-        "MOVE_AFTER_DOWNLOAD",
-        "false"
-    ).lower() == "true"
-
-    print("========================================")
+    print("=" * 45)
     print("       BLUESKY PHOTO MANAGER")
-    print("========================================")
-    print()
-    print(f"Account: {account}")
-    print(
-        f"Move after download: "
-        f"{move_after_download}"
-    )
-    print()
+    print("=" * 45)
+    print(f"\nAccount: {account}")
 
-    photo, path = get_photo(account)
+    photo, local_path = get_photo(account)
 
     if not photo:
+        print("\n📭 Geen bestand om te verwerken.")
         raise SystemExit(0)
 
-    print()
-    print(
-        "🎉 Photo Manager download successful!"
-    )
-
-    if move_after_download:
-        mark_photo_used(photo)
-
-        print()
-        print(
-            "🎉 Photo Manager move test successful!"
-        )
-
-    else:
-        print()
-        print("ℹ️ Media was NOT moved.")
-        print(
-            f"ℹ️ It is still in "
-            f"{account}/ready"
-        )
+    print("\n✅ Download geslaagd.")
+    print("ℹ️ Bestand staat nog in ready totdat new_post.py")
+    print("   het succesvol of na een mislukte postpoging")
+    print("   naar used verplaatst.")
