@@ -1,369 +1,325 @@
+
 import os
 import sys
+import subprocess
+import shutil
 from pathlib import Path
 
 from atproto import Client, models
 
+ACCOUNT_NAME = os.getenv("ACCOUNT_NAME", "Beautyfan")
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "beautyfan.bsky.social")
+BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
 
-# ============================================================
-# CONFIG
-# ============================================================
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_EXTENSIONS = {".mp4"}
+GIF_EXTENSIONS = {".gif"}
+CONVERTED_DIR = Path("photo_downloads/converted")
 
-ACCOUNT_NAME = os.getenv(
-    "ACCOUNT_NAME",
-    "Beautyfan"
-)
-
-BLUESKY_HANDLE = os.getenv(
-    "BLUESKY_HANDLE",
-    "beautyfan.bsky.social"
-)
-
-BLUESKY_PASSWORD = os.getenv(
-    "BLUESKY_PASSWORD"
-)
-
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-}
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-}
-
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def fail(message):
-    print(f"❌ {message}")
+    print(f"❌ {message}", flush=True)
     sys.exit(1)
 
 
-def get_media_type(filename):
-    extension = Path(filename).suffix.lower()
+def run_ffmpeg(args):
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError(
+            "FFmpeg is niet geïnstalleerd. Voeg aan de workflow toe: "
+            "sudo apt-get install -y ffmpeg"
+        )
 
-    if extension in IMAGE_EXTENSIONS:
-        return "image"
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
+        capture_output=True,
+        text=True,
+    )
 
-    if extension in VIDEO_EXTENSIONS:
-        return "video"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Onbekende FFmpeg-fout").strip()
+        raise RuntimeError(detail[-2500:])
 
-    return None
+
+def prepare_media(path):
+    """Bereid afbeeldingen, GIF's en MP4-video's voor op Bluesky."""
+    from PIL import Image, ImageOps
+
+    path = Path(path)
+    ext = path.suffix.lower()
+    CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
+
+    # GIF: behoud de animatie door naar MP4 om te zetten.
+    if ext in GIF_EXTENSIONS:
+        output = CONVERTED_DIR / f"{path.stem}_animated.mp4"
+
+        run_ffmpeg([
+            "-i", str(path),
+            "-vf",
+            "scale=w='min(1920,iw)':h='min(1920,ih)':"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "fps=30,format=yuv420p",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-movflags", "+faststart",
+            str(output),
+        ])
+
+        if not output.exists() or output.stat().st_size == 0:
+            raise RuntimeError("GIF-conversie heeft geen MP4-bestand opgeleverd.")
+
+        return output, "video", None, None
+
+    # MP4: normaliseer naar een compatibel videoformaat.
+    if ext in VIDEO_EXTENSIONS:
+        output = CONVERTED_DIR / f"{path.stem}_compatible.mp4"
+
+        run_ffmpeg([
+            "-i", str(path),
+            "-vf",
+            "scale=w='min(1920,iw)':h='min(1920,ih)':"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "format=yuv420p",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output),
+        ])
+
+        if not output.exists() or output.stat().st_size == 0:
+            raise RuntimeError("Video-conversie heeft geen MP4-bestand opgeleverd.")
+
+        return output, "video", None, None
+
+    # Afbeeldingen: alleen converteren wanneer nodig.
+    if ext in IMAGE_EXTENSIONS:
+        with Image.open(path) as original:
+            im = ImageOps.exif_transpose(original)
+            width, height = im.size
+
+            needs_convert = (
+                ext == ".webp"
+                or width > 2000
+                or height > 2000
+                or path.stat().st_size > 2 * 1024 * 1024
+            )
+
+            if not needs_convert:
+                return path, "image", width, height
+
+            im.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+
+            if im.mode in ("RGBA", "LA") or "transparency" in im.info:
+                rgba = im.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(
+                    rgba,
+                    mask=rgba.getchannel("A"),
+                )
+                im = background
+            else:
+                im = im.convert("RGB")
+
+            output = CONVERTED_DIR / f"{path.stem}_converted.jpg"
+
+            quality = 88
+            while True:
+                im.save(
+                    output,
+                    "JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=True,
+                )
+
+                if output.stat().st_size <= 2 * 1024 * 1024:
+                    break
+
+                quality -= 7
+
+                if quality < 35:
+                    width, height = im.size
+                    if max(width, height) <= 600:
+                        raise RuntimeError(
+                            "Afbeelding kon niet tot maximaal 2 MB worden verkleind."
+                        )
+
+                    im.thumbnail((
+                        max(600, int(width * 0.8)),
+                        max(600, int(height * 0.8)),
+                    ), Image.Resampling.LANCZOS)
+
+                    quality = 78
+
+            with Image.open(output) as converted:
+                width, height = converted.size
+
+            print(
+                f"Afbeelding geoptimaliseerd: "
+                f"{path.stat().st_size} -> {output.stat().st_size} bytes"
+            )
+
+            return output, "image", width, height
+
+    # Onbekend bestandstype: probeer het eerst als afbeelding te openen.
+    try:
+        with Image.open(path) as original:
+            im = ImageOps.exif_transpose(original)
+            im.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+
+            if im.mode in ("RGBA", "LA") or "transparency" in im.info:
+                rgba = im.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(
+                    rgba,
+                    mask=rgba.getchannel("A"),
+                )
+                im = background
+            else:
+                im = im.convert("RGB")
+
+            output = CONVERTED_DIR / f"{path.stem}_converted.jpg"
+            im.save(output, "JPEG", quality=88, optimize=True)
+
+        with Image.open(output) as converted:
+            width, height = converted.size
+
+        return output, "image", width, height
+
+    except Exception:
+        raise RuntimeError(
+            f"Niet-ondersteund of onleesbaar bestand: {path.name}"
+        )
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def move_to_used(photo, mark_photo_used, reason):
+    """Verplaats het originele Drive-bestand naar used."""
+    try:
+        mark_photo_used(photo)
+        print(f"✅ Bestand verplaatst naar used: {reason}")
+        return True
+    except Exception as exc:
+        print(f"❌ Bestand kon niet naar used worden verplaatst: {exc}")
+        return False
+
 
 def main():
-
     print("=" * 60)
     print("       BLUESKY NEW POST")
     print("=" * 60)
-    print()
-
-    print(f"Account : {ACCOUNT_NAME}")
+    print(f"\nAccount : {ACCOUNT_NAME}")
     print(f"Handle  : {BLUESKY_HANDLE}")
 
-    # --------------------------------------------------------
-    # CHECK PASSWORD
-    # --------------------------------------------------------
-
     if not BLUESKY_PASSWORD:
-        fail(
-            "BLUESKY_PASSWORD is not set."
-        )
+        fail("BLUESKY_PASSWORD is niet ingesteld.")
 
-    # --------------------------------------------------------
-    # GET MEDIA FROM GOOGLE DRIVE
-    # --------------------------------------------------------
+    from photo_manager import get_photo, mark_photo_used
 
-    print()
-    print("🔎 Checking Google Drive...")
+    print("\n🔎 Google Drive controleren...")
 
-    from photo_manager import get_photo
-
-    photo, local_path = get_photo(
-        ACCOUNT_NAME
-    )
-
-    # --------------------------------------------------------
-    # NOTHING TO POST
-    # --------------------------------------------------------
+    photo, local_path = get_photo(ACCOUNT_NAME)
 
     if not photo:
-        print()
-        print("📭 No media found.")
-        print("⏭️ Skip — nothing to post.")
+        print("📭 Geen media gevonden in ready.")
         return
 
     local_path = Path(local_path)
 
-    filename = photo["name"]
-    media_type = get_media_type(filename)
-
-    print()
-    print(f"📁 File : {filename}")
-    print(f"📦 Type : {media_type}")
-    print(f"📏 Size : {photo['size']} bytes")
-
-    if media_type is None:
-        print()
-        print("⚠️ Unsupported file type.")
-        print("⏭️ Skip — file remains in ready.")
-        return
-
-    # --------------------------------------------------------
-    # VERIFY LOCAL FILE
-    # --------------------------------------------------------
+    print(f"\n📁 Bestand: {photo['name']}")
+    print(f"📦 MIME-type: {photo.get('mime_type', 'onbekend')}")
+    print(f"📏 Grootte: {photo['size']} bytes")
 
     if not local_path.exists():
-        fail(
-            f"Downloaded file not found: "
-            f"{local_path}"
-        )
+        fail(f"Gedownload bestand niet gevonden: {local_path}")
 
-    local_size = local_path.stat().st_size
+    if local_path.stat().st_size != photo["size"]:
+        fail("Gedownloade bestandsgrootte komt niet overeen met Google Drive.")
 
-    if local_size != photo["size"]:
-        fail(
-            "Downloaded file size does not match "
-            "the original Drive file."
-        )
-
-    print()
-    print("✅ Original file verified")
-    print(f"   Size: {local_size} bytes")
-
-    # --------------------------------------------------------
-    # GET ORIGINAL IMAGE DIMENSIONS
-    # --------------------------------------------------------
-
-    image_width = None
-    image_height = None
-
-    if media_type == "image":
-
-        try:
-            from PIL import Image
-
-            with Image.open(local_path) as image:
-                image_width, image_height = image.size
-
-        except Exception as exc:
-            fail(
-                f"Could not read image dimensions: {exc}"
-            )
-
-        print()
-        print("📐 Original image dimensions")
-        print(f"   Width : {image_width}px")
-        print(f"   Height: {image_height}px")
-
-    # --------------------------------------------------------
-    # LOGIN
-    # --------------------------------------------------------
-
-    print()
-    print("🔐 Logging into Bluesky...")
-
+    # Login eerst; een loginfout mag niet zomaar een bestand verbruiken.
+    print("\n🔐 Inloggen bij Bluesky...")
     client = Client()
 
     try:
-        client.login(
-            BLUESKY_HANDLE,
-            BLUESKY_PASSWORD
-        )
+        client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
     except Exception as exc:
-        fail(
-            f"Bluesky login failed: {exc}"
-        )
+        fail(f"Bluesky-login mislukt; bestand blijft in ready: {exc}")
 
-    print("✅ Bluesky login successful")
+    print("✅ Ingelogd")
 
-    # --------------------------------------------------------
-    # POST MEDIA
-    # --------------------------------------------------------
-
-    print()
-    print("📤 Posting media...")
+    # Na selectie en login: als media voorbereiden mislukt, verplaats naar used.
+    print("\n🛠️ Media voorbereiden...")
 
     try:
+        upload_path, media_type, width, height = prepare_media(local_path)
+    except Exception as exc:
+        print(f"❌ Media voorbereiden mislukt: {exc}")
+        print("📦 Bestand naar used verplaatsen om herhaling te voorkomen...")
+        move_to_used(photo, mark_photo_used, "media voorbereiden mislukt")
+        sys.exit(1)
 
-        with open(
-            local_path,
-            "rb"
-        ) as media_file:
+    print(
+        f"✅ Media klaar: {upload_path.name} "
+        f"({upload_path.stat().st_size} bytes)"
+    )
 
+    print("\n📤 Media plaatsen op Bluesky...")
+
+    try:
+        with open(upload_path, "rb") as media_file:
             media_data = media_file.read()
 
-        # ====================================================
-        # IMAGE
-        # ====================================================
+        uploaded = client.upload_blob(media_data).blob
 
         if media_type == "image":
-
-            uploaded = client.upload_blob(
-                media_data
-            ).blob
-
-            new_image = (
-                models.AppBskyEmbedImages.Image(
-                    alt="",
-                    image=uploaded,
-                    aspect_ratio={
-                        "width": image_width,
-                        "height": image_height,
-                    }
-                )
+            image = models.AppBskyEmbedImages.Image(
+                alt="",
+                image=uploaded,
+                aspect_ratio={
+                    "width": width,
+                    "height": height,
+                },
             )
-
-            new_embed = (
-                models.AppBskyEmbedImages.Main(
-                    images=[new_image]
-                )
-            )
-
-            response = client.send_post(
-                text="",
-                embed=new_embed
-            )
-
-        # ====================================================
-        # VIDEO
-        # ====================================================
-
-        elif media_type == "video":
-
-            uploaded = client.upload_blob(
-                media_data
-            ).blob
-
-            # Voor video gebruiken we dezelfde Bluesky
-            # embed-methode als in het werkende
-            # WomenWorld-script.
-            #
-            # De aspect ratio wordt hier alleen ingevuld
-            # wanneer we die betrouwbaar kunnen bepalen.
-
-            from PIL import Image
-
-            # Video-afmetingen worden niet uit het bestand
-            # gehaald met Pillow. Daarom gebruiken we voor
-            # video's geen verzonnen aspect ratio.
-
-            new_embed = (
-                models.AppBskyEmbedVideo.Main(
-                    video=uploaded,
-                    alt=None
-                )
-            )
-
-            response = client.send_post(
-                text="",
-                embed=new_embed
-            )
-
+            embed = models.AppBskyEmbedImages.Main(images=[image])
         else:
-
-            fail(
-                "Unknown media type."
+            embed = models.AppBskyEmbedVideo.Main(
+                video=uploaded,
+                alt="",
             )
+
+        response = client.send_post(text="", embed=embed)
 
     except Exception as exc:
-
-        print()
-        print(
-            f"❌ Bluesky post failed: {exc}"
-        )
-
-        print()
-        print(
-            "⚠️ Media remains in "
-            f"{ACCOUNT_NAME}/ready"
-        )
-
+        print(f"❌ Bluesky-post mislukt: {exc}")
+        print("📦 Bestand naar used verplaatsen zodat het niet opnieuw wordt geprobeerd...")
+        move_to_used(photo, mark_photo_used, "postpoging mislukt")
         sys.exit(1)
-
-    # --------------------------------------------------------
-    # VERIFY SUCCESS
-    # --------------------------------------------------------
 
     if not response:
-
-        print()
-        print(
-            "❌ Bluesky returned no response."
-        )
-
-        print(
-            "⚠️ Media remains in ready."
-        )
-
+        print("❌ Bluesky gaf geen bevestiging terug.")
+        move_to_used(photo, mark_photo_used, "geen bevestiging van Bluesky")
         sys.exit(1)
 
-    print()
-    print("✅ Bluesky post successful")
+    print("\n✅ Bluesky-post succesvol")
 
     if hasattr(response, "uri"):
+        print(f"🔗 URI: {response.uri}")
+
+    print("\n📦 Origineel naar used verplaatsen...")
+    if not move_to_used(photo, mark_photo_used, "post succesvol"):
         print(
-            f"🔗 URI: {response.uri}"
+            "⚠️ De post is geplaatst, maar het origineel staat mogelijk "
+            "nog in ready. Controleer Google Drive om dubbel posten te voorkomen."
         )
-
-    # --------------------------------------------------------
-    # MOVE TO USED
-    # --------------------------------------------------------
-
-    print()
-    print("📦 Moving media to used...")
-
-    try:
-
-        from photo_manager import mark_photo_used
-
-        mark_photo_used(photo)
-
-    except Exception as exc:
-
-        print()
-        print(
-            f"❌ Could not move media to used: {exc}"
-        )
-
-        print()
-        print("⚠️ IMPORTANT:")
-        print(
-            "   The Bluesky post WAS successful."
-        )
-        print(
-            "   The media is still in ready."
-        )
-
         sys.exit(1)
 
-    # --------------------------------------------------------
-    # COMPLETE
-    # --------------------------------------------------------
-
-    print()
-    print("🎉 NEW POST COMPLETE!")
-    print(
-        f"   {ACCOUNT_NAME}/ready → "
-        f"{ACCOUNT_NAME}/used"
-    )
-    print()
+    print("\n🎉 KLAAR!")
+    print(f"   {ACCOUNT_NAME}/ready → {ACCOUNT_NAME}/used")
     print("=" * 60)
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
