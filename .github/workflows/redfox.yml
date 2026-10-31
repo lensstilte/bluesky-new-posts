@@ -26,6 +26,8 @@ jobs:
           BLUESKY_HANDLE: redheadheaven.bsky.social
           BLUESKY_PASSWORD: ${{ secrets.POST_REDHEADHEAVEN_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          POST_TEXT: "♥️ @redfoxofficial.bsky.social ♥️"
+          POST_TEXT: |
+            ♥️ @redfoxofficial.bsky.social ♥️
+            🦊 onlyfans.com/redfoxofficial 🦊
         run: |
           python new_post_redfox.py
