@@ -10,7 +10,8 @@ BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "redheadheaven.bsky.social")
 BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
 POST_TEXT = os.getenv(
     "POST_TEXT",
-    "♥️ @redfoxofficial.bsky.social ♥️",
+    "♥️ @redfoxofficial.bsky.social ♥️\n"
+    "🦊 onlyfans.com/redfoxofficial 🦊",
 )
 MENTION_HANDLE = "redfoxofficial.bsky.social"
 
@@ -33,32 +34,54 @@ def get_media_type(filename):
 
 
 def build_post_facets(client, text):
-    """Make the RedFox handle a clickable Bluesky mention when present."""
+    """Make the RedFox handle and OnlyFans URL clickable."""
+    facets = []
+
     token = f"@{MENTION_HANDLE}"
     start_char = text.find(token)
-    if start_char < 0:
-        return None
 
-    try:
-        identity = client.com.atproto.identity.resolve_handle(
-            {"handle": MENTION_HANDLE}
+    if start_char >= 0:
+        try:
+            identity = client.com.atproto.identity.resolve_handle(
+                {"handle": MENTION_HANDLE}
+            )
+            did = identity.did
+
+            byte_start = len(text[:start_char].encode("utf-8"))
+            byte_end = byte_start + len(token.encode("utf-8"))
+
+            mention = models.AppBskyRichtextFacet.Mention(did=did)
+            facet = models.AppBskyRichtextFacet.Main(
+                index=models.AppBskyRichtextFacet.ByteSlice(
+                    byte_start=byte_start,
+                    byte_end=byte_end,
+                ),
+                features=[mention],
+            )
+            facets.append(facet)
+
+        except Exception as exc:
+            print(f"⚠️ Could not resolve mention handle: {exc}")
+
+    url = "https://onlyfans.com/redfoxofficial"
+    url_text = "onlyfans.com/redfoxofficial"
+    url_start = text.find(url_text)
+
+    if url_start >= 0:
+        byte_start = len(text[:url_start].encode("utf-8"))
+        byte_end = byte_start + len(url_text.encode("utf-8"))
+
+        link = models.AppBskyRichtextFacet.Link(uri=url)
+        facet = models.AppBskyRichtextFacet.Main(
+            index=models.AppBskyRichtextFacet.ByteSlice(
+                byte_start=byte_start,
+                byte_end=byte_end,
+            ),
+            features=[link],
         )
-        did = identity.did
-    except Exception as exc:
-        print(f"⚠️ Could not resolve mention handle; posting text without clickable facet: {exc}")
-        return None
+        facets.append(facet)
 
-    byte_start = len(text[:start_char].encode("utf-8"))
-    byte_end = byte_start + len(token.encode("utf-8"))
-    mention = models.AppBskyRichtextFacet.Mention(did=did)
-    facet = models.AppBskyRichtextFacet.Main(
-        index=models.AppBskyRichtextFacet.ByteSlice(
-            byte_start=byte_start,
-            byte_end=byte_end,
-        ),
-        features=[mention],
-    )
-    return [facet]
+    return facets or None
 
 
 def main():
