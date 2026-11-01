@@ -25,7 +25,7 @@ def fail(message):
 
 
 def reboost_last_posts(client):
-    """Repost de laatste 3 eigen originele posts van het actieve account."""
+    """Repost de laatste 3 eigen posts, van oudste naar nieuwste."""
 
     print("\n" + "=" * 60)
     print("       REBOOST LAATSTE 3 EIGEN POSTS")
@@ -47,10 +47,9 @@ def reboost_last_posts(client):
         posts = []
 
         for item in response.feed:
-
             post = item.post
 
-            # Alleen eigen posts.
+            # Alleen eigen originele posts.
             if post.author.did != account_did:
                 continue
 
@@ -58,7 +57,6 @@ def reboost_last_posts(client):
             if item.reason is not None:
                 continue
 
-            # Alleen originele posts.
             if not post.record:
                 continue
 
@@ -71,14 +69,19 @@ def reboost_last_posts(client):
             print("📭 Geen eigen posts gevonden.")
             return
 
+        # Feed is nieuwste eerst.
+        # Omkeren zodat we oudste eerst reposteren.
+        posts.reverse()
+
         print(f"📋 {len(posts)} eigen posts gevonden.")
+        print("📅 Volgorde: oudste → nieuwste")
 
         for number, post in enumerate(posts, start=1):
 
             print(f"\n🔄 Post {number}/{len(posts)}")
             print(f"URI: {post.uri}")
 
-            # Controleer of deze post al gerepost is.
+            # Controleren of de post al gerepost is.
             try:
                 existing = client.app.bsky.feed.get_reposted_by({
                     "uri": post.uri,
@@ -102,9 +105,7 @@ def reboost_last_posts(client):
                     print("✅ Oude repost verwijderd.")
 
             except Exception as exc:
-                print(
-                    f"⚠️ Controle/verwijderen bestaande repost: {exc}"
-                )
+                print(f"⚠️ Controle bestaande repost: {exc}")
 
             # Opnieuw reposteren.
             try:
@@ -113,7 +114,7 @@ def reboost_last_posts(client):
                     post.cid
                 )
 
-                print("✅ Post opnieuw gerepost.")
+                print("✅ Opnieuw gerepost.")
 
             except Exception as exc:
                 print(f"⚠️ Repost mislukt: {exc}")
@@ -142,7 +143,6 @@ def run_ffmpeg(args):
         detail = (
             result.stderr or result.stdout or "Onbekende FFmpeg-fout"
         ).strip()
-
         raise RuntimeError(detail[-2500:])
 
 
@@ -153,12 +153,10 @@ def prepare_media(path):
 
     path = Path(path)
     ext = path.suffix.lower()
-
     CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # GIF: behoud animatie door naar MP4 om te zetten.
+    # GIF: behoud de animatie door naar MP4 om te zetten.
     if ext in GIF_EXTENSIONS:
-
         output = CONVERTED_DIR / f"{path.stem}_animated.mp4"
 
         run_ffmpeg([
@@ -182,9 +180,8 @@ def prepare_media(path):
 
         return output, "video", None, None
 
-    # MP4: normaliseer naar compatibel videoformaat.
+    # MP4: normaliseer naar een compatibel videoformaat.
     if ext in VIDEO_EXTENSIONS:
-
         output = CONVERTED_DIR / f"{path.stem}_compatible.mp4"
 
         run_ffmpeg([
@@ -211,9 +208,7 @@ def prepare_media(path):
 
     # Afbeeldingen: alleen converteren wanneer nodig.
     if ext in IMAGE_EXTENSIONS:
-
         with Image.open(path) as original:
-
             im = ImageOps.exif_transpose(original)
             width, height = im.size
 
@@ -227,23 +222,16 @@ def prepare_media(path):
             if not needs_convert:
                 return path, "image", width, height
 
-            im.thumbnail(
-                (2000, 2000),
-                Image.Resampling.LANCZOS
-            )
+            im.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
 
             if im.mode in ("RGBA", "LA") or "transparency" in im.info:
-
                 rgba = im.convert("RGBA")
                 background = Image.new("RGB", rgba.size, "white")
-
                 background.paste(
                     rgba,
                     mask=rgba.getchannel("A"),
                 )
-
                 im = background
-
             else:
                 im = im.convert("RGB")
 
@@ -252,7 +240,6 @@ def prepare_media(path):
             quality = 88
 
             while True:
-
                 im.save(
                     output,
                     "JPEG",
@@ -267,7 +254,6 @@ def prepare_media(path):
                 quality -= 7
 
                 if quality < 35:
-
                     width, height = im.size
 
                     if max(width, height) <= 600:
@@ -275,13 +261,10 @@ def prepare_media(path):
                             "Afbeelding kon niet tot maximaal 2 MB worden verkleind."
                         )
 
-                    im.thumbnail(
-                        (
-                            max(600, int(width * 0.8)),
-                            max(600, int(height * 0.8)),
-                        ),
-                        Image.Resampling.LANCZOS
-                    )
+                    im.thumbnail((
+                        max(600, int(width * 0.8)),
+                        max(600, int(height * 0.8)),
+                    ), Image.Resampling.LANCZOS)
 
                     quality = 78
 
@@ -297,39 +280,23 @@ def prepare_media(path):
 
     # Onbekend bestandstype: probeer het eerst als afbeelding te openen.
     try:
-
         with Image.open(path) as original:
-
             im = ImageOps.exif_transpose(original)
-
-            im.thumbnail(
-                (2000, 2000),
-                Image.Resampling.LANCZOS
-            )
+            im.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
 
             if im.mode in ("RGBA", "LA") or "transparency" in im.info:
-
                 rgba = im.convert("RGBA")
                 background = Image.new("RGB", rgba.size, "white")
-
                 background.paste(
                     rgba,
                     mask=rgba.getchannel("A"),
                 )
-
                 im = background
-
             else:
                 im = im.convert("RGB")
 
             output = CONVERTED_DIR / f"{path.stem}_converted.jpg"
-
-            im.save(
-                output,
-                "JPEG",
-                quality=88,
-                optimize=True
-            )
+            im.save(output, "JPEG", quality=88, optimize=True)
 
         with Image.open(output) as converted:
             width, height = converted.size
@@ -346,22 +313,16 @@ def move_to_used(photo, mark_photo_used, reason):
     """Verplaats het originele Drive-bestand naar used."""
 
     try:
-
         mark_photo_used(photo)
-
         print(f"✅ Bestand verplaatst naar used: {reason}")
-
         return True
 
     except Exception as exc:
-
         print(f"❌ Bestand kon niet naar used worden verplaatst: {exc}")
-
         return False
 
 
 def main():
-
     print("=" * 60)
     print("       BLUESKY NEW POST")
     print("=" * 60)
@@ -394,53 +355,31 @@ def main():
     if local_path.stat().st_size != photo["size"]:
         fail("Gedownloade bestandsgrootte komt niet overeen met Google Drive.")
 
-    # Login.
+    # Login eerst.
     print("\n🔐 Inloggen bij Bluesky...")
 
     client = Client()
 
     try:
-
-        client.login(
-            BLUESKY_HANDLE,
-            BLUESKY_PASSWORD
-        )
-
+        client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
     except Exception as exc:
-
-        fail(
-            f"Bluesky-login mislukt; bestand blijft in ready: {exc}"
-        )
+        fail(f"Bluesky-login mislukt; bestand blijft in ready: {exc}")
 
     print("✅ Ingelogd")
 
-    # NIEUW: eerst de laatste 3 eigen posts reboosten.
-    # Dit gebeurt automatisch voor het account van de workflow.
+    # Eerst de laatste 3 eigen posts opnieuw reposten.
     reboost_last_posts(client)
 
-    # Bestaande media-voorbereiding blijft behouden.
+    # Bestaande media-voorbereiding.
     print("\n🛠️ Media voorbereiden...")
 
     try:
-
-        upload_path, media_type, width, height = prepare_media(
-            local_path
-        )
+        upload_path, media_type, width, height = prepare_media(local_path)
 
     except Exception as exc:
-
         print(f"❌ Media voorbereiden mislukt: {exc}")
-
-        print(
-            "📦 Bestand naar used verplaatsen om herhaling te voorkomen..."
-        )
-
-        move_to_used(
-            photo,
-            mark_photo_used,
-            "media voorbereiden mislukt"
-        )
-
+        print("📦 Bestand naar used verplaatsen om herhaling te voorkomen...")
+        move_to_used(photo, mark_photo_used, "media voorbereiden mislukt")
         sys.exit(1)
 
     print(
@@ -448,18 +387,15 @@ def main():
         f"({upload_path.stat().st_size} bytes)"
     )
 
-    # Bestaande uploadprocedure.
     print("\n📤 Media plaatsen op Bluesky...")
 
     try:
-
         with open(upload_path, "rb") as media_file:
             media_data = media_file.read()
 
         uploaded = client.upload_blob(media_data).blob
 
         if media_type == "image":
-
             image = models.AppBskyEmbedImages.Image(
                 alt="",
                 image=uploaded,
@@ -469,48 +405,25 @@ def main():
                 },
             )
 
-            embed = models.AppBskyEmbedImages.Main(
-                images=[image]
-            )
+            embed = models.AppBskyEmbedImages.Main(images=[image])
 
         else:
-
             embed = models.AppBskyEmbedVideo.Main(
                 video=uploaded,
                 alt="",
             )
 
-        response = client.send_post(
-            text="",
-            embed=embed
-        )
+        response = client.send_post(text="", embed=embed)
 
     except Exception as exc:
-
         print(f"❌ Bluesky-post mislukt: {exc}")
-
-        print(
-            "📦 Bestand naar used verplaatsen zodat het niet opnieuw wordt geprobeerd..."
-        )
-
-        move_to_used(
-            photo,
-            mark_photo_used,
-            "postpoging mislukt"
-        )
-
+        print("📦 Bestand naar used verplaatsen zodat het niet opnieuw wordt geprobeerd...")
+        move_to_used(photo, mark_photo_used, "postpoging mislukt")
         sys.exit(1)
 
     if not response:
-
         print("❌ Bluesky gaf geen bevestiging terug.")
-
-        move_to_used(
-            photo,
-            mark_photo_used,
-            "geen bevestiging van Bluesky"
-        )
-
+        move_to_used(photo, mark_photo_used, "geen bevestiging van Bluesky")
         sys.exit(1)
 
     print("\n✅ Bluesky-post succesvol")
@@ -520,23 +433,15 @@ def main():
 
     print("\n📦 Origineel naar used verplaatsen...")
 
-    if not move_to_used(
-        photo,
-        mark_photo_used,
-        "post succesvol"
-    ):
-
+    if not move_to_used(photo, mark_photo_used, "post succesvol"):
         print(
             "⚠️ De post is geplaatst, maar het origineel staat mogelijk "
             "nog in ready. Controleer Google Drive om dubbel posten te voorkomen."
         )
-
         sys.exit(1)
 
     print("\n🎉 KLAAR!")
-
     print(f"   {ACCOUNT_NAME}/ready → {ACCOUNT_NAME}/used")
-
     print("=" * 60)
 
 
