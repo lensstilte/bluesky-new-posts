@@ -27,22 +27,22 @@ POST_TEXT = os.getenv(
 )
 
 MENTION_HANDLE = "redfoxofficial.bsky.social"
+MENTION_TEXT = "@redfoxofficial.bsky.social"
 
-# RedFox custom feed
 FEED_URI = (
     "at://did:plc:cxrt7ggxkamgzxa47cggtees/"
     "app.bsky.feed.generator/aaaoirmgh53zw"
 )
 
-FEED_AUTHOR = "redfoxofficial.bsky.social"
 FEED_LOOKBACK_HOURS = 5
 FEED_PAGE_SIZE = 100
 MAX_FEED_PAGES = 20
 
-# State file: stored alongside this script
-STATE_FILE = Path(__file__).resolve().parent / "redfox_feed_state.json"
+STATE_FILE = (
+    Path(__file__).resolve().parent /
+    "redfox_feed_state.json"
+)
 
-# Keep processed entries for 90 days
 STATE_RETENTION_DAYS = 90
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -92,13 +92,74 @@ def parse_timestamp(value):
 
 
 # ============================================================
+# MEDIA DETECTION
+# ============================================================
+
+def embed_has_media(embed):
+    if not embed:
+        return False
+
+    # Direct image embed
+    if getattr(embed, "images", None):
+        return True
+
+    # Direct video embed
+    if getattr(embed, "video", None):
+        return True
+
+    # Quote with media
+    nested_media = getattr(embed, "media", None)
+
+    if nested_media:
+        if getattr(nested_media, "images", None):
+            return True
+
+        if getattr(nested_media, "video", None):
+            return True
+
+    # Some embed models contain nested record/media objects
+    record_with_media = getattr(embed, "record_with_media", None)
+
+    if record_with_media:
+        nested = getattr(record_with_media, "media", None)
+
+        if nested:
+            if getattr(nested, "images", None):
+                return True
+
+            if getattr(nested, "video", None):
+                return True
+
+    return False
+
+
+def post_has_media(post):
+    if embed_has_media(getattr(post, "embed", None)):
+        return True
+
+    record = getattr(post, "record", None)
+
+    if record and embed_has_media(
+        getattr(record, "embed", None)
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
 # STATE MANAGEMENT
 # ============================================================
 
 def load_feed_state():
     if not STATE_FILE.exists():
-        print("📝 No previous feed state found. Starting fresh.")
-        return {"processed": {}}
+        print("📝 No previous feed state found.")
+        state = {"processed": {}}
+
+        # Create initial state file
+        save_feed_state(state)
+
+        return state
 
     try:
         with STATE_FILE.open("r", encoding="utf-8") as file:
@@ -112,7 +173,7 @@ def load_feed_state():
 
         print(
             f"📝 Loaded {len(state['processed'])} "
-            "previously processed feed items."
+            "previously processed items."
         )
 
         return state
@@ -126,10 +187,10 @@ def load_feed_state():
 def save_feed_state(state):
     temporary_file = STATE_FILE.with_suffix(".tmp")
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=STATE_RETENTION_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=STATE_RETENTION_DAYS
+    )
 
-    # Remove old state entries
     cleaned = {}
 
     for uri, processed_at in state["processed"].items():
@@ -166,18 +227,10 @@ def mark_feed_item_processed(state, uri):
 
 
 # ============================================================
-# CHECK WHETHER REDHEADHEAVEN ALREADY REPOSTED
+# CHECK EXISTING REPOST
 # ============================================================
 
 def already_reposted_by_us(client, uri, cid, our_did):
-    """
-    Check Bluesky directly to see whether the current account
-    has already reposted this post.
-
-    Pagination is used so that the account is not missed when
-    a post has many reposts.
-    """
-
     cursor = None
 
     while True:
@@ -201,43 +254,75 @@ def already_reposted_by_us(client, uri, cid, our_did):
 
 
 # ============================================================
-# REDFOX FEED REPOSTER
+# CHECK EXISTING LIKE
+# ============================================================
+
+def already_liked_by_us(client, uri, cid, our_did):
+    cursor = None
+
+    while True:
+        response = client.get_likes(
+            uri=uri,
+            cid=cid,
+            cursor=cursor,
+            limit=100
+        )
+
+        for like in response.likes:
+            actor = getattr(like, "actor", None)
+
+            if actor and actor.did == our_did:
+                return True
+
+        cursor = getattr(response, "cursor", None)
+
+        if not cursor:
+            break
+
+    return False
+
+
+# ============================================================
+# REDFOX MENTIONS FEED
 # ============================================================
 
 def repost_redfox_feed(client):
+
     print()
     print("=" * 60)
-    print("       REDFOX FEED REPOSTER")
+    print("       REDFOX MENTIONS FEED")
     print("=" * 60)
 
     try:
         state = load_feed_state()
+
     except Exception as exc:
-        print(f"❌ Feed state error: {exc}")
-        print("⚠️ Feed reposting skipped to avoid duplicates.")
+        print(f"❌ State error: {exc}")
+        print("⚠️ Feed processing stopped to prevent duplicates.")
         return
 
     our_did = getattr(client.me, "did", None)
 
     if not our_did:
         print("❌ Could not determine RedheadHeaven DID.")
-        print("⚠️ Feed reposting skipped.")
         return
 
     cutoff = datetime.now(timezone.utc) - timedelta(
         hours=FEED_LOOKBACK_HOURS
     )
 
-    print(f"🔎 Feed author : @{FEED_AUTHOR}")
-    print(f"🕒 Lookback    : {FEED_LOOKBACK_HOURS} hours")
+    print(f"🔎 Required mention : {MENTION_TEXT}")
+    print(f"🕒 Lookback         : {FEED_LOOKBACK_HOURS} hours")
     print("📥 Fetching feed...")
 
     candidates = {}
+
     cursor = None
     pages_read = 0
 
     try:
         while pages_read < MAX_FEED_PAGES:
+
             params = {
                 "feed": FEED_URI,
                 "limit": FEED_PAGE_SIZE
@@ -251,23 +336,26 @@ def repost_redfox_feed(client):
             pages_read += 1
 
             for item in response.feed:
+
                 post = item.post
-                author = getattr(post, "author", None)
-
-                if not author:
-                    continue
-
-                # Only RedFox's own posts and replies
-                if author.handle.lower() != FEED_AUTHOR.lower():
-                    continue
 
                 record = getattr(post, "record", None)
 
                 if not record:
                     continue
 
-                # Replies are deliberately included.
-                # We do not filter out records with a reply field.
+                # Include posts AND replies.
+                # No author filter: this is a mentions feed.
+
+                text = getattr(record, "text", "") or ""
+
+                # Exact Bluesky handle must appear in text
+                if MENTION_TEXT.lower() not in text.lower():
+                    continue
+
+                # Only posts containing actual media
+                if not post_has_media(post):
+                    continue
 
                 timestamp = parse_timestamp(
                     getattr(record, "created_at", None)
@@ -278,13 +366,17 @@ def repost_redfox_feed(client):
                         getattr(post, "indexed_at", None)
                     )
 
-                if not timestamp or timestamp < cutoff:
+                if not timestamp:
+                    continue
+
+                if timestamp < cutoff:
                     continue
 
                 candidates[post.uri] = {
                     "uri": post.uri,
                     "cid": post.cid,
-                    "timestamp": timestamp
+                    "timestamp": timestamp,
+                    "text": text
                 }
 
             cursor = getattr(response, "cursor", None)
@@ -293,11 +385,17 @@ def repost_redfox_feed(client):
                 break
 
         print(f"📄 Feed pages read : {pages_read}")
-        print(f"🎯 RedFox items    : {len(candidates)}")
+        print(f"🎯 Matching media  : {len(candidates)}")
+
+        if pages_read >= MAX_FEED_PAGES and cursor:
+            print(
+                "⚠️ Page limit reached. "
+                "Some older feed items may not have been checked."
+            )
 
     except Exception as exc:
-        print(f"❌ Could not retrieve RedFox feed: {exc}")
-        print("⚠️ Continuing with the new media post.")
+        print(f"❌ Feed retrieval failed: {exc}")
+        print("⚠️ Continuing with Google Drive media.")
         return
 
     # Oldest first, newest last
@@ -306,55 +404,94 @@ def repost_redfox_feed(client):
         key=lambda item: item["timestamp"]
     )
 
-    reposted = 0
-    skipped = 0
-    errors = 0
+    reposted_count = 0
+    liked_count = 0
+    skipped_count = 0
+    error_count = 0
 
     for item in ordered_posts:
+
         uri = item["uri"]
         cid = item["cid"]
 
-        # Already processed in an earlier workflow run
+        # Already processed in a previous workflow run
         if uri in state["processed"]:
-            skipped += 1
-            print(f"⏭️ Already processed: {uri}")
+            print(f"⏭️ Already in state: {uri}")
+            skipped_count += 1
             continue
 
+        print()
+        print(f"🔎 Processing: {uri}")
+        print(f"📝 Text: {item['text'][:120]}")
+
         try:
-            # Check Bluesky itself as well as our state file
+
+            # --------------------------------------------
+            # REPOST
+            # --------------------------------------------
+
             if already_reposted_by_us(
                 client,
                 uri,
                 cid,
                 our_did
             ):
-                print(f"⏭️ Already reposted by RedheadHeaven: {uri}")
+                print("⏭️ Already reposted by RedheadHeaven.")
 
-                mark_feed_item_processed(state, uri)
-                skipped += 1
-                continue
+            else:
+                client.repost(uri, cid)
 
-            print(f"🔁 Reposting RedFox item: {uri}")
+                reposted_count += 1
 
-            client.repost(uri, cid)
+                print("✅ Reposted successfully.")
 
-            # Save immediately after each successful repost
+            # --------------------------------------------
+            # LIKE
+            # --------------------------------------------
+
+            if already_liked_by_us(
+                client,
+                uri,
+                cid,
+                our_did
+            ):
+                print("⏭️ Already liked by RedheadHeaven.")
+
+            else:
+                client.like(uri, cid)
+
+                liked_count += 1
+
+                print("❤️ Liked successfully.")
+
+            # --------------------------------------------
+            # SAVE STATE
+            # --------------------------------------------
+
             mark_feed_item_processed(state, uri)
 
-            reposted += 1
-            print("✅ Reposted successfully")
+            print("💾 Saved to feed state.")
 
         except Exception as exc:
-            errors += 1
-            print(f"❌ Could not repost {uri}: {exc}")
-            print("⚠️ Item was not marked as processed.")
+
+            error_count += 1
+
+            print(f"❌ Processing failed: {exc}")
+            print("⚠️ Item not marked as processed.")
+            print("   It can be retried during the next run.")
 
     print()
-    print("REDFOX FEED SUMMARY")
-    print(f"   New reposts       : {reposted}")
-    print(f"   Already processed : {skipped}")
-    print(f"   Errors            : {errors}")
-    print(f"   State file        : {STATE_FILE.name}")
+    print("=" * 60)
+    print("       REDFOX FEED SUMMARY")
+    print("=" * 60)
+
+    print(f"   Matching media : {len(candidates)}")
+    print(f"   New reposts    : {reposted_count}")
+    print(f"   New likes      : {liked_count}")
+    print(f"   Already known  : {skipped_count}")
+    print(f"   Errors         : {error_count}")
+    print(f"   State file     : {STATE_FILE.name}")
+
     print("=" * 60)
 
 
@@ -408,6 +545,7 @@ def build_post_facets(client, text):
     url_start = text.find(url_text)
 
     if url_start >= 0:
+
         byte_start = len(
             text[:url_start].encode("utf-8")
         )
@@ -438,6 +576,7 @@ def build_post_facets(client, text):
 # ============================================================
 
 def main():
+
     print("=" * 60)
     print("       REDFOX NEW POST")
     print("=" * 60)
@@ -473,13 +612,13 @@ def main():
     print("✅ Bluesky login successful")
 
     # --------------------------------------------------------
-    # 2. REPOST REDFOX FEED
+    # 2. REDFOX FEED REPOST + LIKE
     # --------------------------------------------------------
 
     repost_redfox_feed(client)
 
     # --------------------------------------------------------
-    # 3. GET NEW GOOGLE DRIVE MEDIA
+    # 3. GOOGLE DRIVE MEDIA
     # --------------------------------------------------------
 
     print()
@@ -495,7 +634,7 @@ def main():
 
     if not photo:
         print("📭 No media found. Skip — nothing to post.")
-        print("✅ RedFox feed check has still been completed.")
+        print("✅ RedFox feed processing has been completed.")
         return
 
     local_path = Path(local_path)
@@ -520,12 +659,13 @@ def main():
         )
 
     # --------------------------------------------------------
-    # 4. READ IMAGE DIMENSIONS
+    # 4. IMAGE DIMENSIONS
     # --------------------------------------------------------
 
     image_width = image_height = None
 
     if media_type == "image":
+
         try:
             from PIL import Image
 
@@ -543,6 +683,7 @@ def main():
     print("📤 Posting Redfox media...")
 
     try:
+
         with local_path.open("rb") as media_file:
             media_data = media_file.read()
 
@@ -554,6 +695,7 @@ def main():
         )
 
         if media_type == "image":
+
             image = models.AppBskyEmbedImages.Image(
                 alt="",
                 image=uploaded,
@@ -568,6 +710,7 @@ def main():
             )
 
         else:
+
             embed = models.AppBskyEmbedVideo.Main(
                 video=uploaded,
                 alt=None
@@ -584,6 +727,7 @@ def main():
         response = client.send_post(**post_kwargs)
 
     except Exception as exc:
+
         print(f"❌ Bluesky post failed: {exc}")
         print("⚠️ Media remains in Redfox/Ready.")
         sys.exit(1)
@@ -610,16 +754,21 @@ def main():
         mark_photo_used(photo)
 
     except Exception as exc:
+
         print(
             "❌ Post succeeded, but moving media failed: "
             f"{exc}"
         )
+
         print("⚠️ The media may still be in Redfox/Ready.")
         sys.exit(1)
 
     print()
     print("🎉 REDFOX NEW POST COMPLETE!")
-    print("   redheadheaven/Redfox/Ready → redheadheaven/Redfox/Used")
+    print(
+        "   redheadheaven/Redfox/Ready "
+        "→ redheadheaven/Redfox/Used"
+    )
 
 
 if __name__ == "__main__":
