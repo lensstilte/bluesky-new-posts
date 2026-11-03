@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,6 +49,9 @@ STATE_RETENTION_DAYS = 90
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4"}
 
+MAX_IMAGE_BYTES = 1_900_000
+IMAGE_COMPRESSION_TRIGGER = 2_000_000
+
 
 # ============================================================
 # GENERAL FUNCTIONS
@@ -92,6 +96,123 @@ def parse_timestamp(value):
 
 
 # ============================================================
+# IMAGE COMPRESSION
+# ============================================================
+
+def prepare_image_for_upload(local_path):
+    """
+    Leave images up to 2 MB unchanged.
+    Compress larger images to JPEG under 1.9 MB.
+    Original Google Drive file is never modified.
+    """
+
+    from PIL import Image, ImageOps
+
+    original_data = local_path.read_bytes()
+
+    with Image.open(io.BytesIO(original_data)) as source:
+        image = ImageOps.exif_transpose(source)
+        image.load()
+
+        image_width, image_height = image.size
+
+        if len(original_data) <= IMAGE_COMPRESSION_TRIGGER:
+            print("✅ Image is within upload size limit.")
+            return original_data, image_width, image_height
+
+        print()
+        print("🗜️ LARGE IMAGE DETECTED")
+        print(f"   Original size : {len(original_data):,} bytes")
+        print("   Target size   : Maximum 1,900,000 bytes")
+        print("   Compressing image...")
+
+        # Convert to RGB.
+        # Transparent images receive a white background.
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+
+            rgba = image.convert("RGBA")
+
+            background = Image.new(
+                "RGB",
+                rgba.size,
+                (255, 255, 255)
+            )
+
+            background.paste(
+                rgba,
+                mask=rgba.getchannel("A")
+            )
+
+            image = background
+
+        else:
+            image = image.convert("RGB")
+
+        # Try JPEG quality levels first.
+        # If still too large, gradually reduce dimensions.
+        quality_levels = [
+            90, 85, 80, 75, 70, 65,
+            60, 55, 50, 45, 40
+        ]
+
+        for resize_attempt in range(25):
+
+            for quality in quality_levels:
+
+                output = io.BytesIO()
+
+                image.save(
+                    output,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=True
+                )
+
+                compressed_data = output.getvalue()
+
+                if len(compressed_data) <= MAX_IMAGE_BYTES:
+
+                    print("✅ Image compression successful")
+                    print(
+                        f"   Original : {len(original_data):,} bytes"
+                    )
+                    print(
+                        f"   Compressed: {len(compressed_data):,} bytes"
+                    )
+                    print(f"   Quality   : {quality}")
+                    print(
+                        f"   Dimensions: {image.width}x{image.height}"
+                    )
+
+                    return (
+                        compressed_data,
+                        image.width,
+                        image.height
+                    )
+
+            # Reduce dimensions if quality alone is insufficient.
+            new_width = max(1, int(image.width * 0.85))
+            new_height = max(1, int(image.height * 0.85))
+
+            if new_width == image.width and new_height == image.height:
+                break
+
+            image = image.resize(
+                (new_width, new_height),
+                Image.Resampling.LANCZOS
+            )
+
+            print(
+                f"   Resizing to {new_width}x{new_height}..."
+            )
+
+        raise RuntimeError(
+            "Could not compress image below 1.9 MB."
+        )
+
+
+# ============================================================
 # MEDIA DETECTION
 # ============================================================
 
@@ -99,15 +220,12 @@ def embed_has_media(embed):
     if not embed:
         return False
 
-    # Direct image embed
     if getattr(embed, "images", None):
         return True
 
-    # Direct video embed
     if getattr(embed, "video", None):
         return True
 
-    # Quote with media
     nested_media = getattr(embed, "media", None)
 
     if nested_media:
@@ -117,7 +235,6 @@ def embed_has_media(embed):
         if getattr(nested_media, "video", None):
             return True
 
-    # Some embed models contain nested record/media objects
     record_with_media = getattr(embed, "record_with_media", None)
 
     if record_with_media:
@@ -155,10 +272,7 @@ def load_feed_state():
     if not STATE_FILE.exists():
         print("📝 No previous feed state found.")
         state = {"processed": {}}
-
-        # Create initial state file
         save_feed_state(state)
-
         return state
 
     try:
@@ -338,22 +452,16 @@ def repost_redfox_feed(client):
             for item in response.feed:
 
                 post = item.post
-
                 record = getattr(post, "record", None)
 
                 if not record:
                     continue
 
-                # Include posts AND replies.
-                # No author filter: this is a mentions feed.
-
                 text = getattr(record, "text", "") or ""
 
-                # Exact Bluesky handle must appear in text
                 if MENTION_TEXT.lower() not in text.lower():
                     continue
 
-                # Only posts containing actual media
                 if not post_has_media(post):
                     continue
 
@@ -398,7 +506,6 @@ def repost_redfox_feed(client):
         print("⚠️ Continuing with Google Drive media.")
         return
 
-    # Oldest first, newest last
     ordered_posts = sorted(
         candidates.values(),
         key=lambda item: item["timestamp"]
@@ -414,7 +521,6 @@ def repost_redfox_feed(client):
         uri = item["uri"]
         cid = item["cid"]
 
-        # Already processed in a previous workflow run
         if uri in state["processed"]:
             print(f"⏭️ Already in state: {uri}")
             skipped_count += 1
@@ -426,10 +532,6 @@ def repost_redfox_feed(client):
 
         try:
 
-            # --------------------------------------------
-            # REPOST
-            # --------------------------------------------
-
             if already_reposted_by_us(
                 client,
                 uri,
@@ -440,14 +542,8 @@ def repost_redfox_feed(client):
 
             else:
                 client.repost(uri, cid)
-
                 reposted_count += 1
-
                 print("✅ Reposted successfully.")
-
-            # --------------------------------------------
-            # LIKE
-            # --------------------------------------------
 
             if already_liked_by_us(
                 client,
@@ -459,17 +555,10 @@ def repost_redfox_feed(client):
 
             else:
                 client.like(uri, cid)
-
                 liked_count += 1
-
                 print("❤️ Liked successfully.")
 
-            # --------------------------------------------
-            # SAVE STATE
-            # --------------------------------------------
-
             mark_feed_item_processed(state, uri)
-
             print("💾 Saved to feed state.")
 
         except Exception as exc:
@@ -500,7 +589,6 @@ def repost_redfox_feed(client):
 # ============================================================
 
 def build_post_facets(client, text):
-    """Make the RedFox handle and OnlyFans URL clickable."""
 
     facets = []
 
@@ -659,117 +747,33 @@ def main():
         )
 
     # --------------------------------------------------------
-    # 4. IMAGE DIMENSIONS
+    # 4. PREPARE MEDIA
     # --------------------------------------------------------
 
     image_width = image_height = None
 
+    print()
+    print("📦 Preparing media for upload...")
+
     if media_type == "image":
 
         try:
-            from PIL import Image
-
-            with Image.open(local_path) as image:
-                image_width, image_height = image.size
+            media_data, image_width, image_height = (
+                prepare_image_for_upload(local_path)
+            )
 
         except Exception as exc:
-            fail(f"Could not read image dimensions: {exc}")
+            fail(f"Image preparation failed: {exc}")
+
+    else:
+        # Videos remain completely unchanged.
+        with local_path.open("rb") as media_file:
+            media_data = media_file.read()
+
+        print("🎬 Video detected — original video unchanged.")
 
     # --------------------------------------------------------
     # 5. POST NEW MEDIA
     # --------------------------------------------------------
 
-    print()
-    print("📤 Posting Redfox media...")
-
-    try:
-
-        with local_path.open("rb") as media_file:
-            media_data = media_file.read()
-
-        uploaded = client.upload_blob(media_data).blob
-
-        facets = build_post_facets(
-            client,
-            POST_TEXT
-        )
-
-        if media_type == "image":
-
-            image = models.AppBskyEmbedImages.Image(
-                alt="",
-                image=uploaded,
-                aspect_ratio={
-                    "width": image_width,
-                    "height": image_height
-                },
-            )
-
-            embed = models.AppBskyEmbedImages.Main(
-                images=[image]
-            )
-
-        else:
-
-            embed = models.AppBskyEmbedVideo.Main(
-                video=uploaded,
-                alt=None
-            )
-
-        post_kwargs = {
-            "text": POST_TEXT,
-            "embed": embed
-        }
-
-        if facets:
-            post_kwargs["facets"] = facets
-
-        response = client.send_post(**post_kwargs)
-
-    except Exception as exc:
-
-        print(f"❌ Bluesky post failed: {exc}")
-        print("⚠️ Media remains in Redfox/Ready.")
-        sys.exit(1)
-
-    if not response:
-        fail(
-            "Bluesky returned no response. "
-            "Media remains in Ready."
-        )
-
-    print("✅ Bluesky post successful")
-
-    if hasattr(response, "uri"):
-        print(f"🔗 URI: {response.uri}")
-
-    # --------------------------------------------------------
-    # 6. MOVE MEDIA TO USED
-    # --------------------------------------------------------
-
-    print()
-    print("📦 Moving media to Redfox/Used...")
-
-    try:
-        mark_photo_used(photo)
-
-    except Exception as exc:
-
-        print(
-            "❌ Post succeeded, but moving media failed: "
-            f"{exc}"
-        )
-
-        print("⚠️ The media may still be in Redfox/Ready.")
-        sys.exit(1)
-
-    print()
-    print("🎉 REDFOX NEW POST COMPLETE!")
-    print(
-        "   redheadheaven/Redfox/Ready "
-        "→ redheadheaven/Redfox/Used"
-    )
-
-
-if __name__ == "__main__":
-    main()
+    
