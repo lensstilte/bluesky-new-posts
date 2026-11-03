@@ -776,4 +776,96 @@ def main():
     # 5. POST NEW MEDIA
     # --------------------------------------------------------
 
+    print()
+    print("📤 Posting Redfox media...")
+
+    try:
+
+        uploaded = client.upload_blob(media_data).blob
+
+        facets = build_post_facets(
+            client,
+            POST_TEXT
+        )
+
+        if media_type == "image":
+
+            image = models.AppBskyEmbedImages.Image(
+                alt="",
+                image=uploaded,
+                aspect_ratio={
+                    "width": image_width,
+                    "height": image_height
+                },
+            )
+
+            embed = models.AppBskyEmbedImages.Main(
+                images=[image]
+            )
+
+        else:
+
+            embed = models.AppBskyEmbedVideo.Main(
+                video=uploaded,
+                alt=None
+            )
+
+        post_kwargs = {
+            "text": POST_TEXT,
+            "embed": embed
+        }
+
+        if facets:
+            post_kwargs["facets"] = facets
+
+        response = client.send_post(**post_kwargs)
+
+    except Exception as exc:
+
+        print(f"❌ Bluesky post failed: {exc}")
+        print("⚠️ Media remains in Redfox/Ready.")
+        sys.exit(1)
+
+    if not response:
+        fail(
+            "Bluesky returned no response. "
+            "Media remains in Ready."
+        )
+
+    print("✅ Bluesky post successful")
+
+    if hasattr(response, "uri"):
+        print(f"🔗 URI: {response.uri}")
+
+    # --------------------------------------------------------
+    # 6. MOVE MEDIA TO USED
+    # --------------------------------------------------------
+
+    print()
+    print("📦 Moving media to Redfox/Used...")
+
+    try:
+        mark_photo_used(photo)
+
+    except Exception as exc:
+
+        print(
+            "❌ Post succeeded, but moving media failed: "
+            f"{exc}"
+        )
+
+        print("⚠️ The media may still be in Redfox/Ready.")
+        sys.exit(1)
+
+    print()
+    print("🎉 REDFOX NEW POST COMPLETE!")
+    print(
+        "   redheadheaven/Redfox/Ready "
+        "→ redheadheaven/Redfox/Used"
+    )
+
+
+if __name__ == "__main__":
+    main()
+
     
