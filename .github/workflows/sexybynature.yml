@@ -1,0 +1,38 @@
+
+name: SexyByNature New Post
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sexybynature-new-post
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install atproto google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib Pillow
+
+      - name: Publish SexyByNature media
+        env:
+          ACCOUNT_NAME: sexybynature
+          BLUESKY_HANDLE: sexybynature.bsky.social
+          BLUESKY_PASSWORD: ${{ secrets.POST_SEXYBYNATURE_PASSWORD }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python new_post.py
