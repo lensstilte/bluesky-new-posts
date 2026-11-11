@@ -39,7 +39,7 @@ jobs:
       - name: Run RedfoxSH
         env:
           BLUESKY_HANDLE: sapphicheaven.bsky.social
-          BLUESKY_PASSWORD: ${{ secrets.BLUESKY_PASSWORD }}
+          BLUESKY_PASSWORD: ${{ secrets.SAPPHICHEAVEN_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_MAIN_FOLDER_ID: 1MJ8DREkZ8h8Z_F6Ej652TBgjG379mWp5
           SOURCE_ROOT_FOLDER_NAME: redfox
