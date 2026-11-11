@@ -26,6 +26,11 @@ jobs:
           pip install google-auth
           pip install google-auth-httplib2
           pip install google-auth-oauthlib
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
 
       - name: Post Beautyfan media
         env:
