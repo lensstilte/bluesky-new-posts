@@ -21,10 +21,7 @@ RESOLVE_URL = (
     "com.atproto.identity.resolveHandle"
 )
 
-DESCRIBE_URL = (
-    "https://public.api.bsky.app/xrpc/"
-    "com.atproto.repo.describeRepo"
-)
+PLC_DIRECTORY = "https://plc.directory"
 
 LOGIN_URL = (
     "https://bsky.social/xrpc/"
@@ -67,11 +64,7 @@ def load_state():
         return data
 
     except Exception as exc:
-        log.warning(
-            "Statebestand niet leesbaar: %s",
-            exc
-        )
-
+        log.warning("Statebestand niet leesbaar: %s", exc)
         return {"downloaded": {}}
 
 
@@ -90,7 +83,7 @@ def get_session():
     session = requests.Session()
 
     session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/3.0"
+        "User-Agent": "RedFoxMediaDownloader/4.0"
     })
 
     return session
@@ -113,29 +106,45 @@ def resolve_did(session):
 
 
 def get_pds(session, did):
+    """
+    Haalt het DID-document rechtstreeks op bij plc.directory.
+    Zo vermijden we de 501-fout van public.api.bsky.app.
+    """
+
+    if did.startswith("did:plc:"):
+        url = f"{PLC_DIRECTORY}/{did}"
+
+    elif did.startswith("did:web:"):
+        domain = did[len("did:web:"):].replace("%3A", ":")
+        url = f"https://{domain}/.well-known/did.json"
+
+    else:
+        raise RuntimeError(
+            f"Niet-ondersteund DID-type: {did}"
+        )
+
     response = session.get(
-        DESCRIBE_URL,
-        params={"repo": did},
+        url,
         timeout=REQUEST_TIMEOUT,
     )
 
     response.raise_for_status()
 
-    services = (
-        response.json()
-        .get("didDoc", {})
-        .get("service", [])
-    )
+    did_document = response.json()
 
-    for service in services:
-        if service.get("id", "").endswith("#atproto_pds"):
+    for service in did_document.get("service", []):
+        service_id = service.get("id", "")
+
+        if service_id.endswith("#atproto_pds"):
             endpoint = service.get("serviceEndpoint")
 
             if endpoint:
-                return endpoint.rstrip("/")
+                endpoint = endpoint.rstrip("/")
+                log.info("PDS gevonden voor %s: %s", did, endpoint)
+                return endpoint
 
     raise RuntimeError(
-        f"Geen PDS gevonden voor {did}"
+        f"Geen #atproto_pds gevonden in DID-document van {did}"
     )
 
 
@@ -185,11 +194,9 @@ def create_bluesky_search_session():
     search_session = requests.Session()
 
     search_session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/3.0",
+        "User-Agent": "RedFoxMediaDownloader/4.0",
         "Authorization": f"Bearer {access_jwt}",
-        "atproto-proxy": (
-            "did:web:api.bsky.app#bsky_appview"
-        ),
+        "atproto-proxy": "did:web:api.bsky.app#bsky_appview",
     })
 
     log.info("Bluesky-login gelukt.")
@@ -280,18 +287,11 @@ def find_blob_cid(blob):
     return blob.get("cid")
 
 
-def get_embed_type(embed):
-    if not isinstance(embed, dict):
-        return ""
-
-    return embed.get("$type", "")
-
-
 def unwrap_media_embed(embed):
     if not isinstance(embed, dict):
         return {}
 
-    embed_type = get_embed_type(embed)
+    embed_type = embed.get("$type", "")
 
     if "recordWithMedia" in embed_type:
         return embed.get("media") or {}
@@ -300,11 +300,6 @@ def unwrap_media_embed(embed):
 
 
 def media_items(post):
-    """
-    Herkent afbeeldingen en video's in originele
-    embeds en Bluesky-weergave-embeds.
-    """
-
     found = []
 
     record = post.get("record") or {}
@@ -317,14 +312,8 @@ def media_items(post):
         post.get("embed") or {}
     )
 
-    raw_type = get_embed_type(raw_embed)
-    view_type = get_embed_type(view_embed)
-
-    log.debug(
-        "Embed types: record=%s view=%s",
-        raw_type,
-        view_type,
-    )
+    raw_type = raw_embed.get("$type", "")
+    view_type = view_embed.get("$type", "")
 
     # Afbeeldingen
     if "images" in raw_type or "images" in view_type:
@@ -390,10 +379,9 @@ def media_items(post):
                 "kind": "video",
             })
 
-    # Extra controle voor onverwachte embedstructuren
     if not found:
         log.debug(
-            "Geen media herkend. Record embed: %s | View embed: %s",
+            "Geen media herkend: record=%s view=%s",
             raw_type or "geen",
             view_type or "geen",
         )
@@ -465,9 +453,7 @@ def download_media(
     response.raise_for_status()
 
     if not response.content:
-        raise RuntimeError(
-            "Leeg mediabestand ontvangen."
-        )
+        raise RuntimeError("Leeg mediabestand ontvangen.")
 
     destination.write_bytes(response.content)
 
@@ -512,9 +498,7 @@ def upload_to_drive(
     metadata = {
         "name": filename,
         "parents": [folder_id],
-        "description": (
-            f"Bluesky media van @{HANDLE}"
-        ),
+        "description": f"Bluesky media van @{HANDLE}",
     }
 
     media = MediaFileUpload(
@@ -541,9 +525,7 @@ def main():
     ).strip()
 
     if not folder_id:
-        raise RuntimeError(
-            "DRIVE_FOLDER_ID ontbreekt."
-        )
+        raise RuntimeError("DRIVE_FOLDER_ID ontbreekt.")
 
     TEMP_DIR.mkdir(exist_ok=True)
 
@@ -581,10 +563,7 @@ def main():
         since_iso,
     )
 
-    log.info(
-        "Zoekresultaten totaal: %s",
-        len(posts),
-    )
+    log.info("Zoekresultaten totaal: %s", len(posts))
 
     mention_count = 0
     media_count = 0
@@ -606,10 +585,7 @@ def main():
         if indexed_at and indexed_at < since_iso:
             continue
 
-        if not contains_redfox_mention(
-            post,
-            redfox_did,
-        ):
+        if not contains_redfox_mention(post, redfox_did):
             continue
 
         mention_count += 1
@@ -625,10 +601,7 @@ def main():
         mention_count,
     )
 
-    log.info(
-        "Media gevonden: %s",
-        media_count,
-    )
+    log.info("Media gevonden: %s", media_count)
 
     log.info(
         "Berichten met vermelding en media: %s",
@@ -650,13 +623,25 @@ def main():
         author_did = post["author"]["did"]
         rkey = uri.rsplit("/", 1)[-1]
 
-        if author_did not in pds_cache:
-            pds_cache[author_did] = get_pds(
-                session,
-                author_did,
-            )
+        try:
+            if author_did not in pds_cache:
+                pds_cache[author_did] = get_pds(
+                    session,
+                    author_did,
+                )
 
-        author_pds = pds_cache[author_did]
+            author_pds = pds_cache[author_did]
+
+        except Exception as exc:
+            failed_count += len(items)
+
+            log.exception(
+                "PDS ophalen mislukt voor %s (%s): %s",
+                author,
+                author_did,
+                exc,
+            )
+            continue
 
         for index, item in enumerate(items, start=1):
             cid = item.get("cid")
@@ -758,8 +743,5 @@ if __name__ == "__main__":
         main()
 
     except Exception as exc:
-        log.exception(
-            "Downloader gestopt: %s",
-            exc
-        )
+        log.exception("Downloader gestopt: %s", exc)
         sys.exit(1)
