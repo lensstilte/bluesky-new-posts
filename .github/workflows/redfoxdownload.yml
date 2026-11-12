@@ -1,0 +1,55 @@
+name: RedFox Media Download
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: redfox-media-download
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests google-auth google-api-python-client
+
+      - name: Run RedFox downloader
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+        run: python redfoxdownload.py
+
+      - name: Save download state
+        if: always()
+        run: |
+          if [ -f redfoxdownload_state.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add redfoxdownload_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update RedFox download state"
+              git push
+            else
+              echo "Geen nieuwe statewijzigingen om op te slaan."
+            fi
+          else
+            echo "Statebestand bestaat nog niet; niets opgeslagen."
+          fi
