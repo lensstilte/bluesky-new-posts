@@ -13,6 +13,7 @@ import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 
 HANDLE = "redfoxofficial.bsky.social"
 
@@ -48,6 +49,10 @@ logging.basicConfig(
 log = logging.getLogger("redfoxdownload")
 
 
+# ============================================================
+# STATE
+# ============================================================
+
 def load_state():
     if not STATE_FILE.exists():
         return {"downloaded": {}}
@@ -61,6 +66,7 @@ def load_state():
             raise ValueError("Ongeldig statebestand")
 
         data.setdefault("downloaded", {})
+
         return data
 
     except Exception as exc:
@@ -79,11 +85,15 @@ def save_state(state):
     )
 
 
+# ============================================================
+# BLUESKY CONNECTION
+# ============================================================
+
 def get_session():
     session = requests.Session()
 
     session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/4.0"
+        "User-Agent": "RedFoxMediaDownloader/4.1"
     })
 
     return session
@@ -108,7 +118,6 @@ def resolve_did(session):
 def get_pds(session, did):
     """
     Haalt het DID-document rechtstreeks op bij plc.directory.
-    Zo vermijden we de 501-fout van public.api.bsky.app.
     """
 
     if did.startswith("did:plc:"):
@@ -140,7 +149,13 @@ def get_pds(session, did):
 
             if endpoint:
                 endpoint = endpoint.rstrip("/")
-                log.info("PDS gevonden voor %s: %s", did, endpoint)
+
+                log.info(
+                    "PDS gevonden voor %s: %s",
+                    did,
+                    endpoint,
+                )
+
                 return endpoint
 
     raise RuntimeError(
@@ -194,7 +209,7 @@ def create_bluesky_search_session():
     search_session = requests.Session()
 
     search_session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/4.0",
+        "User-Agent": "RedFoxMediaDownloader/4.1",
         "Authorization": f"Bearer {access_jwt}",
         "atproto-proxy": "did:web:api.bsky.app#bsky_appview",
     })
@@ -204,6 +219,10 @@ def create_bluesky_search_session():
 
     return search_session, pds.rstrip("/")
 
+
+# ============================================================
+# BLUESKY SEARCH
+# ============================================================
 
 def search_recent_posts(session, pds, since_iso):
     endpoint = (
@@ -271,6 +290,10 @@ def contains_redfox_mention(post, redfox_did):
 
     return False
 
+
+# ============================================================
+# MEDIA DETECTION
+# ============================================================
 
 def find_blob_cid(blob):
     if not isinstance(blob, dict):
@@ -413,6 +436,10 @@ def extension_for(mime, kind):
     return ".jpg"
 
 
+# ============================================================
+# MEDIA DOWNLOAD
+# ============================================================
+
 def download_media(
     session,
     pds,
@@ -453,12 +480,18 @@ def download_media(
     response.raise_for_status()
 
     if not response.content:
-        raise RuntimeError("Leeg mediabestand ontvangen.")
+        raise RuntimeError(
+            "Leeg mediabestand ontvangen."
+        )
 
     destination.write_bytes(response.content)
 
     return len(response.content)
 
+
+# ============================================================
+# GOOGLE DRIVE CONNECTION
+# ============================================================
 
 def create_drive_service():
     raw = os.environ.get(
@@ -472,6 +505,8 @@ def create_drive_service():
 
     info = json.loads(raw)
 
+    client_email = info.get("client_email", "onbekend")
+
     credentials = (
         service_account.Credentials
         .from_service_account_info(
@@ -480,12 +515,132 @@ def create_drive_service():
         )
     )
 
-    return build(
+    service = build(
         "drive",
         "v3",
         credentials=credentials,
         cache_discovery=False,
     )
+
+    log.info(
+        "Google Drive verbonden als: %s",
+        client_email,
+    )
+
+    return service
+
+
+def validate_drive_folder(service, folder_id):
+    """
+    Controleert vooraf of de serviceaccount toegang heeft
+    tot de opgegeven Google Drive-map.
+    """
+
+    log.info(
+        "Google Drive-map controleren: %s",
+        folder_id,
+    )
+
+    try:
+        folder = (
+            service.files()
+            .get(
+                fileId=folder_id,
+                fields=(
+                    "id,name,mimeType,driveId,parents"
+                ),
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+
+    except HttpError as exc:
+        status = getattr(
+            exc.resp,
+            "status",
+            "onbekend",
+        )
+
+        if status == 404:
+            raise RuntimeError(
+                "GOOGLE DRIVE MAP NIET TOEGANKELIJK. "
+                "Google Drive geeft 404 terug bij het openen "
+                "van DRIVE_FOLDER_ID. Controleer of de map-ID "
+                "juist is en of de serviceaccount als Editor "
+                "met dit exacte e-mailadres toegang heeft. "
+                "Serviceaccount moet toegang hebben tot de map."
+            ) from exc
+
+        raise RuntimeError(
+            f"Google Drive-mapcontrole mislukt: {exc}"
+        ) from exc
+
+    if folder.get("mimeType") != "application/vnd.google-apps.folder":
+        raise RuntimeError(
+            "DRIVE_FOLDER_ID verwijst niet naar een Google Drive-map. "
+            f"Gevonden type: {folder.get('mimeType')}"
+        )
+
+    log.info(
+        "Drive-map gevonden: %s",
+        folder.get("name"),
+    )
+
+    log.info(
+        "Drive-map ID: %s",
+        folder.get("id"),
+    )
+
+    log.info(
+        "Drive-map type: %s",
+        folder.get("mimeType"),
+    )
+
+    if folder.get("driveId"):
+        log.info(
+            "Map bevindt zich in een gedeelde Drive: %s",
+            folder.get("driveId"),
+        )
+    else:
+        log.info(
+            "Map bevindt zich in een persoonlijke Drive."
+        )
+
+    # Controleer of de mapinhoud zichtbaar is.
+    try:
+        result = (
+            service.files()
+            .list(
+                q=f"'{folder_id}' in parents and trashed = false",
+                pageSize=10,
+                fields="files(id,name,mimeType)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+
+        children = result.get("files", [])
+
+        log.info(
+            "Drive-mapcontrole geslaagd. "
+            "Zichtbare bestaande bestanden: %s",
+            len(children),
+        )
+
+        for child in children[:5]:
+            log.info(
+                "Bestaand bestand in map: %s",
+                child.get("name"),
+            )
+
+    except HttpError as exc:
+        raise RuntimeError(
+            "De map is gevonden, maar de inhoud kan niet worden "
+            f"opgevraagd. Drive-fout: {exc}"
+        ) from exc
+
+    return folder
 
 
 def upload_to_drive(
@@ -507,17 +662,33 @@ def upload_to_drive(
         resumable=True,
     )
 
-    return (
-        service.files()
-        .create(
-            body=metadata,
-            media_body=media,
-            fields="id,name,size",
-            supportsAllDrives=True,
+    try:
+        result = (
+            service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id,name,size,parents",
+                supportsAllDrives=True,
+            )
+            .execute()
         )
-        .execute()
-    )
 
+        return result
+
+    except HttpError as exc:
+        log.error(
+            "Google Drive uploadfout voor %s: %s",
+            filename,
+            exc,
+        )
+
+        raise
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
     folder_id = os.environ.get(
@@ -525,7 +696,9 @@ def main():
     ).strip()
 
     if not folder_id:
-        raise RuntimeError("DRIVE_FOLDER_ID ontbreekt.")
+        raise RuntimeError(
+            "DRIVE_FOLDER_ID ontbreekt."
+        )
 
     TEMP_DIR.mkdir(exist_ok=True)
 
@@ -540,7 +713,13 @@ def main():
         create_bluesky_search_session()
     )
 
+    # Drive eerst controleren, vóór het downloaden.
     drive = create_drive_service()
+
+    validate_drive_folder(
+        drive,
+        folder_id,
+    )
 
     since = (
         datetime.now(timezone.utc)
@@ -563,7 +742,10 @@ def main():
         since_iso,
     )
 
-    log.info("Zoekresultaten totaal: %s", len(posts))
+    log.info(
+        "Zoekresultaten totaal: %s",
+        len(posts),
+    )
 
     mention_count = 0
     media_count = 0
@@ -585,7 +767,10 @@ def main():
         if indexed_at and indexed_at < since_iso:
             continue
 
-        if not contains_redfox_mention(post, redfox_did):
+        if not contains_redfox_mention(
+            post,
+            redfox_did,
+        ):
             continue
 
         mention_count += 1
@@ -601,7 +786,10 @@ def main():
         mention_count,
     )
 
-    log.info("Media gevonden: %s", media_count)
+    log.info(
+        "Media gevonden: %s",
+        media_count,
+    )
 
     log.info(
         "Berichten met vermelding en media: %s",
@@ -641,6 +829,7 @@ def main():
                 author_did,
                 exc,
             )
+
             continue
 
         for index, item in enumerate(items, start=1):
@@ -706,9 +895,10 @@ def main():
                 uploaded_count += 1
 
                 log.info(
-                    "GEUPLOAD: %s (%s bytes)",
+                    "GEUPLOAD: %s (%s bytes) | Drive ID: %s",
                     filename,
                     size,
+                    result.get("id"),
                 )
 
             except Exception as exc:
@@ -743,5 +933,12 @@ if __name__ == "__main__":
         main()
 
     except Exception as exc:
-        log.exception("Downloader gestopt: %s", exc)
+        log.exception(
+            "Downloader gestopt: %s",
+            exc,
+        )
+
         sys.exit(1)
+
+
+                
