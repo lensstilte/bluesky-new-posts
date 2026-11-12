@@ -35,6 +35,8 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          DOWNLOAD_BSKY_USERNAME: ${{ secrets.DOWNLOAD_BSKY_USERNAME }}
+          DOWNLOAD_BSKY_APP_PASSWORD: ${{ secrets.DOWNLOAD_BSKY_APP_PASSWORD }}
         run: python redfoxdownload.py
 
       - name: Save download state
@@ -43,7 +45,9 @@ jobs:
           if [ -f redfoxdownload_state.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
             git add redfoxdownload_state.json
+
             if ! git diff --cached --quiet; then
               git commit -m "Update RedFox download state"
               git push
