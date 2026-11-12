@@ -8,7 +8,6 @@ import time
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 from google.oauth2 import service_account
@@ -17,8 +16,20 @@ from googleapiclient.http import MediaFileUpload
 
 HANDLE = "redfoxofficial.bsky.social"
 
-RESOLVE_URL = "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
-DESCRIBE_URL = "https://public.api.bsky.app/xrpc/com.atproto.repo.describeRepo"
+RESOLVE_URL = (
+    "https://public.api.bsky.app/xrpc/"
+    "com.atproto.identity.resolveHandle"
+)
+
+DESCRIBE_URL = (
+    "https://public.api.bsky.app/xrpc/"
+    "com.atproto.repo.describeRepo"
+)
+
+LOGIN_URL = (
+    "https://bsky.social/xrpc/"
+    "com.atproto.server.createSession"
+)
 
 STATE_FILE = Path("redfoxdownload_state.json")
 TEMP_DIR = Path("redfoxdownload_temp")
@@ -48,26 +59,40 @@ def load_state():
         data = json.loads(
             STATE_FILE.read_text(encoding="utf-8")
         )
+
+        if not isinstance(data, dict):
+            raise ValueError("Ongeldig statebestand")
+
         data.setdefault("downloaded", {})
         return data
 
     except Exception as exc:
-        log.warning("Statebestand niet leesbaar: %s", exc)
+        log.warning(
+            "Statebestand niet leesbaar: %s",
+            exc
+        )
+
         return {"downloaded": {}}
 
 
 def save_state(state):
     STATE_FILE.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False),
+        json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False
+        ),
         encoding="utf-8",
     )
 
 
 def get_session():
     session = requests.Session()
+
     session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/2.0"
+        "User-Agent": "RedFoxMediaDownloader/3.0"
     })
+
     return session
 
 
@@ -77,9 +102,11 @@ def resolve_did(session):
         params={"handle": HANDLE},
         timeout=REQUEST_TIMEOUT,
     )
+
     response.raise_for_status()
 
     did = response.json()["did"]
+
     log.info("RedFoxOfficial DID: %s", did)
 
     return did
@@ -91,6 +118,7 @@ def get_pds(session, did):
         params={"repo": did},
         timeout=REQUEST_TIMEOUT,
     )
+
     response.raise_for_status()
 
     services = (
@@ -101,7 +129,10 @@ def get_pds(session, did):
 
     for service in services:
         if service.get("id", "").endswith("#atproto_pds"):
-            return service["serviceEndpoint"].rstrip("/")
+            endpoint = service.get("serviceEndpoint")
+
+            if endpoint:
+                return endpoint.rstrip("/")
 
     raise RuntimeError(
         f"Geen PDS gevonden voor {did}"
@@ -124,13 +155,14 @@ def create_bluesky_search_session():
         )
 
     response = requests.post(
-        "https://bsky.social/xrpc/com.atproto.server.createSession",
+        LOGIN_URL,
         json={
             "identifier": username,
             "password": password,
         },
         timeout=REQUEST_TIMEOUT,
     )
+
     response.raise_for_status()
 
     login = response.json()
@@ -153,9 +185,11 @@ def create_bluesky_search_session():
     search_session = requests.Session()
 
     search_session.headers.update({
-        "User-Agent": "RedFoxMediaDownloader/2.0",
+        "User-Agent": "RedFoxMediaDownloader/3.0",
         "Authorization": f"Bearer {access_jwt}",
-        "atproto-proxy": "did:web:api.bsky.app#bsky_appview",
+        "atproto-proxy": (
+            "did:web:api.bsky.app#bsky_appview"
+        ),
     })
 
     log.info("Bluesky-login gelukt.")
@@ -174,7 +208,6 @@ def search_recent_posts(session, pds, since_iso):
     results = []
 
     for page in range(MAX_PAGES):
-
         params = {
             "q": HANDLE,
             "sort": "latest",
@@ -190,6 +223,7 @@ def search_recent_posts(session, pds, since_iso):
             params=params,
             timeout=REQUEST_TIMEOUT,
         )
+
         response.raise_for_status()
 
         payload = response.json()
@@ -223,8 +257,7 @@ def contains_redfox_mention(post, redfox_did):
     for facet in record.get("facets", []) or []:
         for feature in facet.get("features", []) or []:
             if (
-                feature.get("$type")
-                == "app.bsky.richtext.facet#mention"
+                feature.get("$type", "").endswith("#mention")
                 and feature.get("did") == redfox_did
             ):
                 return True
@@ -241,40 +274,67 @@ def find_blob_cid(blob):
     if isinstance(ref, dict):
         return ref.get("$link")
 
+    if isinstance(ref, str):
+        return ref
+
     return blob.get("cid")
+
+
+def get_embed_type(embed):
+    if not isinstance(embed, dict):
+        return ""
+
+    return embed.get("$type", "")
+
+
+def unwrap_media_embed(embed):
+    if not isinstance(embed, dict):
+        return {}
+
+    embed_type = get_embed_type(embed)
+
+    if "recordWithMedia" in embed_type:
+        return embed.get("media") or {}
+
+    return embed
 
 
 def media_items(post):
     """
-    Leest zowel de ruwe record-embed als de weergegeven embed.
+    Herkent afbeeldingen en video's in originele
+    embeds en Bluesky-weergave-embeds.
     """
 
     found = []
 
     record = post.get("record") or {}
-    raw_embed = record.get("embed") or {}
 
-    view_embed = post.get("embed") or {}
+    raw_embed = unwrap_media_embed(
+        record.get("embed") or {}
+    )
 
-    # Bij recordWithMedia zitten de echte media onder media.
-    if raw_embed.get("$type", "").endswith("#recordWithMedia"):
-        raw_embed = raw_embed.get("media") or {}
+    view_embed = unwrap_media_embed(
+        post.get("embed") or {}
+    )
 
-    if view_embed.get("$type", "").endswith("#recordWithMedia"):
-        view_embed = view_embed.get("media") or {}
+    raw_type = get_embed_type(raw_embed)
+    view_type = get_embed_type(view_embed)
 
-    raw_type = raw_embed.get("$type", "")
-    view_type = view_embed.get("$type", "")
+    log.debug(
+        "Embed types: record=%s view=%s",
+        raw_type,
+        view_type,
+    )
 
     # Afbeeldingen
-    if (
-        raw_type.endswith("#images")
-        or view_type.endswith("#images")
-    ):
+    if "images" in raw_type or "images" in view_type:
         raw_images = raw_embed.get("images", []) or []
         view_images = view_embed.get("images", []) or []
 
-        count = max(len(raw_images), len(view_images))
+        count = max(
+            len(raw_images),
+            len(view_images)
+        )
 
         for index in range(count):
             raw_image = (
@@ -312,10 +372,7 @@ def media_items(post):
                 })
 
     # Video
-    if (
-        raw_type.endswith("#video")
-        or view_type.endswith("#video")
-    ):
+    if "video" in raw_type or "video" in view_type:
         video = raw_embed.get("video") or {}
 
         cid = find_blob_cid(video)
@@ -332,6 +389,14 @@ def media_items(post):
                 "mime": mime,
                 "kind": "video",
             })
+
+    # Extra controle voor onverwachte embedstructuren
+    if not found:
+        log.debug(
+            "Geen media herkend. Record embed: %s | View embed: %s",
+            raw_type or "geen",
+            view_type or "geen",
+        )
 
     return found
 
@@ -389,7 +454,7 @@ def download_media(
 
         if not url:
             raise RuntimeError(
-                "Geen media-CID of media-URL beschikbaar."
+                "Geen media-CID of URL beschikbaar."
             )
 
         response = session.get(
@@ -400,7 +465,9 @@ def download_media(
     response.raise_for_status()
 
     if not response.content:
-        raise RuntimeError("Leeg mediabestand ontvangen.")
+        raise RuntimeError(
+            "Leeg mediabestand ontvangen."
+        )
 
     destination.write_bytes(response.content)
 
@@ -503,8 +570,9 @@ def main():
     )
 
     log.info(
-        "Zoeken vanaf %s (laatste 24 uur)",
+        "Zoeken vanaf %s (laatste %s uur)",
         since_iso,
+        LOOKBACK_HOURS,
     )
 
     posts = search_recent_posts(
@@ -521,6 +589,7 @@ def main():
     mention_count = 0
     media_count = 0
     eligible = []
+
     seen_posts = set()
     pds_cache = {}
 
@@ -689,5 +758,8 @@ if __name__ == "__main__":
         main()
 
     except Exception as exc:
-        log.exception("Downloader gestopt: %s", exc)
+        log.exception(
+            "Downloader gestopt: %s",
+            exc
+        )
         sys.exit(1)
